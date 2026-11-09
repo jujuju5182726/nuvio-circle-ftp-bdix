@@ -1,28 +1,13 @@
 /*
- * Circle FTP (BDIX) provider for Nuvio
- * Ported from the supplied Cloudstream CircleFtpProvider.kt.
- *
- * Nuvio plugins return streams only. They do not provide Cloudstream-style
- * category/home-page browsing. Nuvio calls getStreams(tmdbId, mediaType,
- * season, episode); an optional title argument is also accepted for testing.
+ * Circle FTP BDIX provider for Nuvio
+ * Based on the supplied Cloudstream Kotlin provider and the user's
+ * StreamBDIX/Corpse reference implementation.
+ * Nuvio mediaType: "movie" or "tv". Circle FTP post.type: "singleVideo" or "series".
  */
 
 var MAIN_API = "http://new.circleftp.net:5000";
 var FALLBACK_API = "http://15.1.1.50:5000";
 var USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)";
-
-function cleanTitle(value) {
-  return String(value || "")
-    // TMDB TV page titles sometimes include a type and a year range.
-    .replace(/\s*\((?:TV Series|TV Mini Series|TV Show| miniseries)[^)]*\)\s*/ig, " ")
-    .replace(/\s*\((?:19|20)\d{2}(?:\s*[–-]\s*(?:19|20)\d{2})?\)\s*$/, "")
-    .replace(/\s*-\s*(?:19|20)\d{2}(?:\s*[–-]\s*(?:19|20)\d{2})?\s*$/, "")
-    .replace(/[._]+/g, " ")
-    .replace(/[’']/g, "")
-    .replace(/[^\p{L}\p{N} ]/gu, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
 
 function decodeHtml(value) {
   return String(value || "")
@@ -30,6 +15,22 @@ function decodeHtml(value) {
     .replace(/&#0?39;/g, "'")
     .replace(/&quot;/g, '"')
     .replace(/&#x27;/g, "'");
+}
+
+function cleanTitle(value) {
+  return decodeHtml(String(value || ""))
+    .replace(/\s*\((?:TV Series|TV Mini Series|TV Show|Miniseries)[^)]*\)\s*/ig, " ")
+    .replace(/\s*\((?:19|20)\d{2}(?:\s*[–-]\s*(?:19|20)\d{2})?\)\s*$/, "")
+    .replace(/\s*[-–]\s*(?:19|20)\d{2}(?:\s*[–-]\s*(?:19|20)\d{2})?\s*$/, "")
+    .replace(/[._]+/g, " ")
+    .replace(/[’']/g, "")
+    .replace(/[^a-zA-Z0-9\u00C0-\u024F\u0980-\u09FF ]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function normalize(value) {
+  return cleanTitle(value).toLowerCase().replace(/[^a-z0-9\u0980-\u09FF]/g, "");
 }
 
 function titleFromTmdbPage(html) {
@@ -43,12 +44,11 @@ function titleFromTmdbPage(html) {
     if (match && match[1]) {
       var title = decodeHtml(match[1])
         .replace(/\s*[|–-]\s*The Movie Database.*$/i, "")
-        .replace(/\s*-\s*TMDB.*$/i, "")
+        .replace(/\s*[|–-]\s*TMDB.*$/i, "")
         .replace(/\s*\((?:TV Series|TV Mini Series|TV Show)[^)]*\)\s*/i, " ")
         .replace(/\s*\((?:19|20)\d{2}(?:\s*[–-]\s*(?:19|20)\d{2})?\)\s*$/, "")
-        .replace(/\s*[|–-]\s*TMDB\s*$/i, "")
         .trim();
-      if (title) return title;
+      if (title) return cleanTitle(title);
     }
   }
   return "";
@@ -59,228 +59,246 @@ function tmdbPageUrl(tmdbId, mediaType) {
   return "https://www.themoviedb.org/" + type + "/" + encodeURIComponent(String(tmdbId));
 }
 
-function fetchText(url, headers) {
-  return fetch(url, { method: "GET", headers: headers || { "User-Agent": USER_AGENT } })
-    .then(function (response) {
-      if (!response || !response.ok) {
-        throw new Error("HTTP " + (response ? response.status : "unknown") + " for " + url);
-      }
-      return response.text();
-    });
+function fetchText(url) {
+  return fetch(url, {
+    method: "GET",
+    headers: { "User-Agent": USER_AGENT, "Accept": "text/html,*/*" }
+  }).then(function (response) {
+    if (!response || !response.ok) throw new Error("HTTP " + (response ? response.status : "unknown"));
+    return response.text();
+  });
 }
 
 function fetchJson(endpoint) {
-  var url = MAIN_API + endpoint;
-  return fetch(url, { method: "GET", headers: { "User-Agent": USER_AGENT, "Accept": "application/json" } })
+  var headers = { "User-Agent": USER_AGENT, "Accept": "application/json", "Connection": "close", "Accept-Encoding": "identity" };
+  return fetch(MAIN_API + endpoint, { method: "GET", headers: headers })
     .then(function (response) {
-      if (!response || !response.ok) throw new Error("Primary Circle FTP API unavailable");
+      if (!response || !response.ok) throw new Error("Primary API HTTP " + (response ? response.status : "unknown"));
       return response.json();
     })
-    .catch(function () {
-      return fetch(FALLBACK_API + endpoint, {
-        method: "GET",
-        headers: { "User-Agent": USER_AGENT, "Accept": "application/json" }
-      }).then(function (response) {
-        if (!response || !response.ok) throw new Error("Circle FTP API unavailable on primary and fallback hosts");
-        return response.json();
-      });
+    .catch(function (primaryError) {
+      return fetch(FALLBACK_API + endpoint, { method: "GET", headers: headers })
+        .then(function (response) {
+          if (!response || !response.ok) throw new Error("Fallback API HTTP " + (response ? response.status : "unknown"));
+          return response.json();
+        })
+        .catch(function (fallbackError) {
+          console.error("[Circle FTP] API failed on both hosts:", String(primaryError), String(fallbackError));
+          throw fallbackError;
+        });
     });
 }
 
-function getPostsByTitle(title) {
+function searchPosts(title) {
   var endpoint = "/api/posts?searchTerm=" + encodeURIComponent(title) + "&order=desc";
   return fetchJson(endpoint).then(function (data) {
+    // API normally returns { posts: [...] }; tolerate a direct array too.
+    if (Array.isArray(data)) return data;
     return data && Array.isArray(data.posts) ? data.posts : [];
   });
 }
 
-function scoreMatch(candidate, requested) {
-  var a = cleanTitle(candidate).toLowerCase();
-  var b = cleanTitle(requested).toLowerCase();
-  if (!a || !b) return 0;
-  if (a === b) return 100;
-  if (a.indexOf(b) === 0 || b.indexOf(a) === 0) return 80;
-  if (a.indexOf(b) >= 0 || b.indexOf(a) >= 0) return 60;
-  var aw = a.split(" ");
-  var bw = b.split(" ");
-  var common = 0;
-  for (var i = 0; i < bw.length; i++) if (aw.indexOf(bw[i]) >= 0) common++;
-  return Math.round(50 * common / Math.max(aw.length, bw.length));
+function getPostDetails(id) {
+  return fetchJson("/api/posts/" + encodeURIComponent(String(id)));
 }
 
-function choosePost(posts, title) {
+function expectedPostType(mediaType) {
+  return mediaType === "tv" || mediaType === "series" ? "series" : "singleVideo";
+}
+
+function titleScore(candidate, requested) {
+  var a = normalize(candidate);
+  var b = normalize(requested);
+  if (!a || !b) return 0;
+  if (a === b) return 100;
+  if (a.indexOf(b) === 0 || b.indexOf(a) === 0) return 90;
+  if (a.indexOf(b) >= 0 || b.indexOf(a) >= 0) return 75;
+  var aw = cleanTitle(candidate).toLowerCase().split(/\s+/);
+  var bw = cleanTitle(requested).toLowerCase().split(/\s+/);
+  var common = 0;
+  for (var i = 0; i < bw.length; i++) {
+    if (bw[i] && aw.indexOf(bw[i]) >= 0) common++;
+  }
+  return Math.round(60 * common / Math.max(aw.length, bw.length));
+}
+
+function choosePost(posts, requestedTitle, mediaType) {
+  var wantedType = expectedPostType(mediaType);
   var best = null;
   var bestScore = 0;
   (posts || []).forEach(function (post) {
-    if (!post || (post.type !== "singleVideo" && post.type !== "series")) return;
-    var score = scoreMatch(post.title, title);
+    if (!post || post.type !== wantedType) return;
+    var candidateName = post.name || post.title || "";
+    var score = titleScore(candidateName, requestedTitle);
     if (score > bestScore) {
       best = post;
       bestScore = score;
     }
   });
-  // Avoid returning an obviously unrelated result.
-  return bestScore >= 45 ? best : null;
+  console.log("[Circle FTP] Best", wantedType, "match score:", bestScore, best && (best.name || best.title));
+  return bestScore >= 40 ? best : null;
 }
 
 function directIp(url) {
   if (!url) return "";
   var replacements = [
-    ["index.circleftp.net", "15.1.4.2"],
-    ["index2.circleftp.net", "15.1.4.5"],
-    ["index1.circleftp.net", "15.1.4.9"],
-    ["ftp3.circleftp.net", "15.1.4.7"],
-    ["ftp4.circleftp.net", "15.1.1.5"],
-    ["ftp5.circleftp.net", "15.1.1.15"],
-    ["ftp6.circleftp.net", "15.1.2.3"],
-    ["ftp7.circleftp.net", "15.1.4.8"],
-    ["ftp8.circleftp.net", "15.1.2.2"],
-    ["ftp9.circleftp.net", "15.1.2.12"],
-    ["ftp10.circleftp.net", "15.1.4.3"],
-    ["ftp11.circleftp.net", "15.1.2.6"],
-    ["ftp12.circleftp.net", "15.1.2.1"],
-    ["ftp13.circleftp.net", "15.1.1.18"],
-    ["ftp15.circleftp.net", "15.1.4.12"],
-    ["ftp17.circleftp.net", "15.1.3.8"]
+    ["index.circleftp.net", "15.1.4.2"], ["index2.circleftp.net", "15.1.4.5"],
+    ["index1.circleftp.net", "15.1.4.9"], ["ftp3.circleftp.net", "15.1.4.7"],
+    ["ftp4.circleftp.net", "15.1.1.5"], ["ftp5.circleftp.net", "15.1.1.15"],
+    ["ftp6.circleftp.net", "15.1.2.3"], ["ftp7.circleftp.net", "15.1.4.8"],
+    ["ftp8.circleftp.net", "15.1.2.2"], ["ftp9.circleftp.net", "15.1.2.12"],
+    ["ftp10.circleftp.net", "15.1.4.3"], ["ftp11.circleftp.net", "15.1.2.6"],
+    ["ftp12.circleftp.net", "15.1.2.1"], ["ftp13.circleftp.net", "15.1.1.18"],
+    ["ftp15.circleftp.net", "15.1.4.12"], ["ftp17.circleftp.net", "15.1.3.8"]
   ];
   for (var i = 0; i < replacements.length; i++) {
-    if (url.indexOf(replacements[i][0]) >= 0) {
-      return url.replace(replacements[i][0], replacements[i][1]);
-    }
+    if (url.indexOf(replacements[i][0]) >= 0) return url.replace(replacements[i][0], replacements[i][1]);
   }
   return url;
 }
 
-function qualityFromTitle(title) {
-  var value = String(title || "").toLowerCase();
-  if (value.indexOf("2160") >= 0 || value.indexOf("4k") >= 0) return "4K";
-  if (value.indexOf("1080") >= 0 || value.indexOf("bluray") >= 0 || value.indexOf("web-dl") >= 0) return "1080p";
-  if (value.indexOf("720") >= 0 || value.indexOf("hd") >= 0 || value.indexOf("hdtv") >= 0) return "720p";
-  if (value.indexOf("cam") >= 0) return "CAM";
+function extractQuality(text) {
+  var value = String(text || "").toLowerCase();
+  if (value.indexOf("2160p") >= 0 || value.indexOf("4k") >= 0) return "4K";
+  if (value.indexOf("1080p") >= 0) return "1080p";
+  if (value.indexOf("720p") >= 0) return "720p";
+  if (value.indexOf("480p") >= 0) return "480p";
+  if (value.indexOf("bluray") >= 0 || value.indexOf("blu-ray") >= 0 || value.indexOf("web-dl") >= 0) return "1080p";
+  if (value.indexOf("hdtv") >= 0 || value.indexOf("hdrip") >= 0) return "720p";
   return "Unknown";
 }
 
-function makeStream(url, label, index) {
+function makeStream(url, label, isDirectIp) {
   if (!url || typeof url !== "string") return null;
-  var headers = {
-    "User-Agent": USER_AGENT,
-    "Connection": "close",
-    "Accept-Encoding": "identity"
-  };
   return {
     name: "Circle FTP (BDIX)",
-    title: label + (index ? " [Direct IP]" : " [Domain]"),
+    title: extractQuality(label) + (isDirectIp ? " [Direct IP]" : " [Domain]"),
     url: url,
-    quality: qualityFromTitle(label),
-    headers: headers
+    quality: extractQuality(label),
+    headers: {
+      "User-Agent": USER_AGENT,
+      "Connection": "close",
+      "Accept-Encoding": "identity"
+    }
   };
 }
 
-function selectEpisode(seriesData, seasonNumber, episodeNumber) {
-  var seasons = seriesData && Array.isArray(seriesData.content) ? seriesData.content : [];
+function parseSeasonNumber(seasonName) {
+  var text = String(seasonName || "");
+  var match = text.match(/(?:season|s)\s*[:#._-]?\s*(\d+)/i) || text.match(/(\d+)/);
+  return match ? parseInt(match[1], 10) : null;
+}
+
+function parseEpisodeNumbers(title) {
+  var text = String(title || "");
+  var match = text.match(/S\s*:?\s*(\d+)\s*[.\s:_-]*E\s*:?\s*(\d+)/i);
+  if (match) return { season: parseInt(match[1], 10), episode: parseInt(match[2], 10) };
+  match = text.match(/Season\s*(\d+)\s*[,.: -]*\s*Episode\s*(\d+)/i);
+  if (match) return { season: parseInt(match[1], 10), episode: parseInt(match[2], 10) };
+  match = text.match(/Episode\s*[:#._-]?\s*(\d+)/i);
+  if (match) return { season: null, episode: parseInt(match[1], 10) };
+  match = text.match(/\bEp\.?\s*[:#._-]?\s*(\d+)/i);
+  if (match) return { season: null, episode: parseInt(match[1], 10) };
+  return null;
+}
+
+function selectEpisode(detail, seasonNumber, episodeNumber) {
+  var seasons = detail && Array.isArray(detail.content) ? detail.content : [];
   if (!seasons.length) {
-    console.warn("[Circle FTP] Series detail has no content seasons");
+    console.warn("[Circle FTP] Series detail content is not a season array");
     return null;
   }
 
-  var wantedSeason = Math.max(1, Number(seasonNumber || 1));
-  var wantedEpisode = Math.max(1, Number(episodeNumber || 1));
+  var wantedSeason = Math.max(1, parseInt(seasonNumber, 10) || 1);
+  var wantedEpisode = Math.max(1, parseInt(episodeNumber, 10) || 1);
   var season = null;
 
-  // Prefer the season number encoded in seasonName, if present. Otherwise
-  // use the source's season order, matching the original Cloudstream port.
+  // First use the source's explicit seasonName (e.g. "Season 1", "S:01").
   for (var i = 0; i < seasons.length; i++) {
-    var seasonName = String(seasons[i].seasonName || "");
-    var seasonMatch = seasonName.match(/season\s*(\d+)/i);
-    if (seasonMatch && Number(seasonMatch[1]) === wantedSeason) {
+    if (parseSeasonNumber(seasons[i] && seasons[i].seasonName) === wantedSeason) {
       season = seasons[i];
       break;
     }
   }
-  if (!season) season = seasons[wantedSeason - 1];
+  // Some Circle FTP records have no numeric seasonName; retain source-order fallback.
+  if (!season && seasons[wantedSeason - 1]) season = seasons[wantedSeason - 1];
   if (!season || !Array.isArray(season.episodes)) {
-    console.warn("[Circle FTP] Season not found:", wantedSeason);
+    console.warn("[Circle FTP] Requested season missing:", wantedSeason);
     return null;
   }
 
   var episodes = season.episodes;
-  var selected = episodes[wantedEpisode - 1] || null;
-  if (selected && selected.link) return selected;
-
-  // Some source pages label episode numbers in the title; use that label
-  // as a fallback when the list is sparse or not in strict numeric order.
+  // Prefer explicit episode numbering in titles, including S:01E:02 and Episode 2.
   for (var j = 0; j < episodes.length; j++) {
-    var episodeTitle = String(episodes[j].title || "");
-    var patterns = [
-      new RegExp("\\bS" + String(wantedSeason).padStart(2, "0") + "E" + String(wantedEpisode).padStart(2, "0") + "\\b", "i"),
-      new RegExp("\\bEpisode\\s*" + wantedEpisode + "\\b", "i"),
-      new RegExp("\\bEp\\.?\\s*" + wantedEpisode + "\\b", "i")
-    ];
-    if (patterns.some(function (pattern) { return pattern.test(episodeTitle); }) && episodes[j].link) {
+    var parsed = parseEpisodeNumbers(episodes[j] && episodes[j].title);
+    if (parsed && parsed.episode === wantedEpisode && (parsed.season === null || parsed.season === wantedSeason) && episodes[j].link) {
       return episodes[j];
     }
   }
-  console.warn("[Circle FTP] Episode not found:", wantedSeason, wantedEpisode, "available:", episodes.length);
+  // The reference implementation's positional fallback handles titles without episode labels.
+  var positional = episodes[wantedEpisode - 1];
+  if (positional && positional.link) return positional;
+
+  console.warn("[Circle FTP] Episode missing:", "S" + wantedSeason + "E" + wantedEpisode, "episode count:", episodes.length);
   return null;
 }
 
 function loadPost(post, mediaType, season, episode) {
-  return fetchJson("/api/posts/" + encodeURIComponent(String(post.id))).then(function (data) {
-    if (!data || !data.type) return [];
+  var id = post.id || post._id;
+  if (id === undefined || id === null) return Promise.resolve([]);
+  return getPostDetails(id).then(function (rawDetail) {
+    var detail = rawDetail && rawDetail.post ? rawDetail.post : rawDetail;
+    if (!detail) return [];
     var links = [];
-    if (data.type === "singleVideo") {
-      var movieUrl = typeof data.content === "string" ? data.content : "";
-      if (movieUrl) links.push(movieUrl);
-    } else if (data.type === "series") {
-      var selected = selectEpisode(data, season, episode);
-      if (selected && selected.link) {
-        links.push(selected.link);
-      } else {
-        console.warn("[Circle FTP] No stream extracted for", post.title, "S" + (season || 1) + "E" + (episode || 1));
-      }
+    if (expectedPostType(mediaType) === "singleVideo" && detail.type === "singleVideo") {
+      if (typeof detail.content === "string" && detail.content) links.push(detail.content);
+    } else if (expectedPostType(mediaType) === "series" && detail.type === "series") {
+      var selected = selectEpisode(detail, season, episode);
+      if (selected && selected.link) links.push(selected.link);
     }
 
     var streams = [];
+    var seen = {};
     links.forEach(function (url) {
-      var domain = makeStream(url, post.title || data.title || "Circle FTP", 0);
-      if (domain) streams.push(domain);
-      var ip = directIp(url);
-      if (ip && ip !== url) {
-        var direct = makeStream(ip, post.title || data.title || "Circle FTP", 1);
-        if (direct) streams.push(direct);
+      if (seen[url]) return;
+      seen[url] = true;
+      var primary = makeStream(url, post.quality || post.name || post.title || detail.title || url, false);
+      if (primary) streams.push(primary);
+      var ipUrl = directIp(url);
+      if (ipUrl && ipUrl !== url && !seen[ipUrl]) {
+        seen[ipUrl] = true;
+        var alternate = makeStream(ipUrl, post.quality || post.name || post.title || detail.title || url, true);
+        if (alternate) streams.push(alternate);
       }
     });
     return streams;
   });
 }
 
-function getStreams(tmdbId, mediaType, season, episode, title) {
-  var requestedTitle = title && typeof title === "string" ? title : "";
-  var titlePromise;
-  if (requestedTitle) {
-    titlePromise = Promise.resolve(requestedTitle);
-  } else {
-    titlePromise = fetchText(tmdbPageUrl(tmdbId, mediaType))
-      .then(titleFromTmdbPage);
-  }
+function getStreams(tmdbId, mediaType, season, episode, optionalTitle) {
+  var isTv = mediaType === "tv" || mediaType === "series";
+  var resolvedTitlePromise = optionalTitle && typeof optionalTitle === "string"
+    ? Promise.resolve(cleanTitle(optionalTitle))
+    : fetchText(tmdbPageUrl(tmdbId, isTv ? "tv" : "movie")).then(titleFromTmdbPage);
 
-  return titlePromise.then(function (resolvedTitle) {
-    if (!resolvedTitle) {
-      console.warn("[Circle FTP] Could not resolve TMDB title for ID " + tmdbId);
+  return resolvedTitlePromise.then(function (requestedTitle) {
+    if (!requestedTitle) {
+      console.warn("[Circle FTP] Could not resolve title from TMDB ID", tmdbId);
       return [];
     }
-    return getPostsByTitle(resolvedTitle).then(function (posts) {
-      console.log("[Circle FTP] Search returned", posts.length, "posts for", resolvedTitle);
-      var post = choosePost(posts, resolvedTitle);
-      if (!post) {
-        console.log("[Circle FTP] No confident Circle FTP match for: " + resolvedTitle);
+    console.log("[Circle FTP] Searching", isTv ? "series" : "movie", "title:", requestedTitle);
+    return searchPosts(requestedTitle).then(function (posts) {
+      console.log("[Circle FTP] Search returned", posts.length, "posts for", requestedTitle);
+      var selectedPost = choosePost(posts, requestedTitle, isTv ? "tv" : "movie");
+      if (!selectedPost) {
+        console.warn("[Circle FTP] No matching", isTv ? "series" : "movie", "post for", requestedTitle);
         return [];
       }
-      console.log("[Circle FTP] Matched", post.type, post.title, "for", resolvedTitle);
-      return loadPost(post, mediaType, season, episode);
+      console.log("[Circle FTP] Selected source post:", selectedPost.name || selectedPost.title, selectedPost.type);
+      return loadPost(selectedPost, isTv ? "tv" : "movie", season, episode);
     });
   }).catch(function (error) {
-    console.error("[Circle FTP] " + (error && error.message ? error.message : String(error)));
+    console.error("[Circle FTP] getStreams failed:", error && error.message ? error.message : String(error));
     return [];
   });
 }

@@ -1,18 +1,15 @@
 {
   "name": "Circle FTP BDIX",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "Circle FTP BDIX stream provider for compatible networks in Bangladesh.",
   "scrapers": [
     {
       "id": "circleftp-bdix",
       "name": "Circle FTP BDIX",
-      "description": "Searches Circle FTP for movie and TV streams.",
-      "version": "1.0.3",
+      "description": "Searches Circle FTP for movie and TV episode streams.",
+      "version": "1.0.4",
       "filename": "providers/circleftp.js",
-      "supportedTypes": [
-        "movie",
-        "tv"
-      ],
+      "supportedTypes": ["movie", "tv"],
       "enabled": true
     }
   ]
