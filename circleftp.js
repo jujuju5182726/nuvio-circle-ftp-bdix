@@ -184,30 +184,116 @@ function makeStream(url, label, isDirectIp) {
 }
 
 function parseSeasonNumber(seasonName) {
-  var text = String(seasonName || "");
-  var match = text.match(/(?:season|s)\s*[:#._-]?\s*(\d+)/i) || text.match(/(\d+)/);
-  return match ? parseInt(match[1], 10) : null;
+    if (!seasonName) return null;
+
+    const text = String(seasonName).trim();
+
+    const match =
+        text.match(/\bseason\s*[:#-]?\s*(\d+)\b/i) ||
+        text.match(/\bs(\d+)\b/i);
+
+    return match ? parseInt(match[1], 10) : null;
 }
 
 function parseEpisodeNumbers(title) {
-  var text = String(title || "");
-  var match = text.match(/S\s*:?\s*(\d+)\s*[.\s:_-]*E\s*:?\s*(\d+)/i);
-  if (match) return { season: parseInt(match[1], 10), episode: parseInt(match[2], 10) };
-  match = text.match(/Season\s*(\d+)\s*[,.: -]*\s*Episode\s*(\d+)/i);
-  if (match) return { season: parseInt(match[1], 10), episode: parseInt(match[2], 10) };
-  match = text.match(/Episode\s*[:#._-]?\s*(\d+)/i);
-  if (match) return { season: null, episode: parseInt(match[1], 10) };
-  match = text.match(/\bEp\.?\s*[:#._-]?\s*(\d+)/i);
-  if (match) return { season: null, episode: parseInt(match[1], 10) };
-  return null;
+    if (!title) return null;
+
+    const text = String(title).trim();
+
+    // S03E01, S3E1, S03.E01, S03-E01
+    let match = text.match(/\bS(\d{1,2})\s*[._ -]*E\s*(\d{1,3})\b/i);
+
+    if (match) {
+        return {
+            season: parseInt(match[1], 10),
+            episode: parseInt(match[2], 10)
+        };
+    }
+
+    // Season 3 Episode 1
+    match = text.match(
+        /\bSeason\s*(\d+)\s*[,.:_-]?\s*Episode\s*(\d+)\b/i
+    );
+
+    if (match) {
+        return {
+            season: parseInt(match[1], 10),
+            episode: parseInt(match[2], 10)
+        };
+    }
+
+    // Episode 1, Episode 01, Ep 1
+    match = text.match(/\b(?:Episode|Ep)\s*[:#.-]?\s*(\d+)\b/i);
+
+    if (match) {
+        return {
+            season: null,
+            episode: parseInt(match[1], 10)
+        };
+    }
+
+    return null;
 }
 
 function selectEpisode(detail, seasonNumber, episodeNumber) {
-  var seasons = detail && Array.isArray(detail.content) ? detail.content : [];
-  if (!seasons.length) {
-    console.warn("[Circle FTP] Series detail content is not a season array");
-    return null;
-  }
+    if (!detail || !Array.isArray(detail.content)) {
+        console.warn("[Circle FTP] Invalid series content");
+        return null;
+    }
+
+    const wantedSeason = Number(seasonNumber);
+    const wantedEpisode = Number(episodeNumber);
+
+    // Match by the actual season name, ignoring empty placeholders.
+    const season = detail.content.find(s => {
+        if (!s || !Array.isArray(s.episodes) || s.episodes.length === 0) {
+            return false;
+        }
+
+        return parseSeasonNumber(s.seasonName) === wantedSeason;
+    });
+
+    if (!season) {
+        console.warn(
+            `[Circle FTP] Season ${wantedSeason} not found`
+        );
+        return null;
+    }
+
+    const episodes = season.episodes;
+
+    // First try matching the episode title.
+    let selectedEpisode = episodes.find(ep => {
+        if (!ep || !ep.title || !ep.link) return false;
+
+        const parsed = parseEpisodeNumbers(ep.title);
+
+        if (!parsed || parsed.episode !== wantedEpisode) {
+            return false;
+        }
+
+        return parsed.season === null ||
+            parsed.season === wantedSeason;
+    });
+
+    // Last resort: use the episode's position within the matched season.
+    if (!selectedEpisode) {
+        selectedEpisode = episodes[wantedEpisode - 1];
+    }
+
+    if (!selectedEpisode || !selectedEpisode.link) {
+        console.warn(
+            `[Circle FTP] Episode S${wantedSeason}E${wantedEpisode} not found`
+        );
+        return null;
+    }
+
+    console.log(
+        `[Circle FTP] Selected: ${selectedEpisode.title}`
+    );
+
+    return selectedEpisode;
+}
 
   var wantedSeason = Math.max(1, parseInt(seasonNumber, 10) || 1);
   var wantedEpisode = Math.max(1, parseInt(episodeNumber, 10) || 1);
