@@ -1,11 +1,9 @@
-# Circle FTP BDIX — Nuvio provider (created with ai)
+# Circle FTP BDIX for Nuvio
 
-## Install
-1. In Nuvio, open Settings → Content & Discovery → Plugins → Add Repository.
-2. Paste the raw manifest URL:
-   `https://raw.githubusercontent.com/jujuju5182726/nuvio-circle-ftp-bdix/refs/heads/main/manifest.json`
-3. Refresh, then enable **Circle FTP BDIX**.
+Version 1.0.3. This is a Nuvio stream provider, not a catalog addon. It resolves a TMDB title, searches Circle FTP, and returns movie or selected TV episode links.
 
+For TV, Nuvio must call `getStreams(tmdbId, "tv", season, episode)` with a 1-based season and episode. The provider selects the corresponding Circle FTP episode from the series detail response.
 
-## Network note
-The original source uses plain HTTP and private BDIX IP addresses. Use only on a network where you are authorized to access Circle FTP. The provider does not bypass ISP/network restrictions and only works in Bangladesh 
+Install the repository using the raw URL of `manifest.json`. Keep `providers/circleftp.js` at the relative path declared in the manifest.
+
+The provider has not been live-tested against the Circle FTP API or your ISP's BDIX routing.

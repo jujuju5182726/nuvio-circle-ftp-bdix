@@ -13,9 +13,13 @@ var USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)";
 
 function cleanTitle(value) {
   return String(value || "")
-    .replace(/\s*\((19|20)\d{2}\)\s*$/, "")
-    .replace(/\s*-\s*(19|20)\d{2}\s*$/, "")
+    // TMDB TV page titles sometimes include a type and a year range.
+    .replace(/\s*\((?:TV Series|TV Mini Series|TV Show| miniseries)[^)]*\)\s*/ig, " ")
+    .replace(/\s*\((?:19|20)\d{2}(?:\s*[–-]\s*(?:19|20)\d{2})?\)\s*$/, "")
+    .replace(/\s*-\s*(?:19|20)\d{2}(?:\s*[–-]\s*(?:19|20)\d{2})?\s*$/, "")
     .replace(/[._]+/g, " ")
+    .replace(/[’']/g, "")
+    .replace(/[^\p{L}\p{N} ]/gu, " ")
     .replace(/\s+/g, " ")
     .trim();
 }
@@ -40,7 +44,9 @@ function titleFromTmdbPage(html) {
       var title = decodeHtml(match[1])
         .replace(/\s*[|–-]\s*The Movie Database.*$/i, "")
         .replace(/\s*-\s*TMDB.*$/i, "")
-        .replace(/\s*\(\d{4}\)\s*$/, "")
+        .replace(/\s*\((?:TV Series|TV Mini Series|TV Show)[^)]*\)\s*/i, " ")
+        .replace(/\s*\((?:19|20)\d{2}(?:\s*[–-]\s*(?:19|20)\d{2})?\)\s*$/, "")
+        .replace(/\s*[|–-]\s*TMDB\s*$/i, "")
         .trim();
       if (title) return title;
     }
@@ -172,11 +178,50 @@ function makeStream(url, label, index) {
 
 function selectEpisode(seriesData, seasonNumber, episodeNumber) {
   var seasons = seriesData && Array.isArray(seriesData.content) ? seriesData.content : [];
-  var seasonIndex = Math.max(0, Number(seasonNumber || 1) - 1);
-  var episodeIndex = Math.max(0, Number(episodeNumber || 1) - 1);
-  var season = seasons[seasonIndex];
-  if (!season || !Array.isArray(season.episodes)) return null;
-  return season.episodes[episodeIndex] || null;
+  if (!seasons.length) {
+    console.warn("[Circle FTP] Series detail has no content seasons");
+    return null;
+  }
+
+  var wantedSeason = Math.max(1, Number(seasonNumber || 1));
+  var wantedEpisode = Math.max(1, Number(episodeNumber || 1));
+  var season = null;
+
+  // Prefer the season number encoded in seasonName, if present. Otherwise
+  // use the source's season order, matching the original Cloudstream port.
+  for (var i = 0; i < seasons.length; i++) {
+    var seasonName = String(seasons[i].seasonName || "");
+    var seasonMatch = seasonName.match(/season\s*(\d+)/i);
+    if (seasonMatch && Number(seasonMatch[1]) === wantedSeason) {
+      season = seasons[i];
+      break;
+    }
+  }
+  if (!season) season = seasons[wantedSeason - 1];
+  if (!season || !Array.isArray(season.episodes)) {
+    console.warn("[Circle FTP] Season not found:", wantedSeason);
+    return null;
+  }
+
+  var episodes = season.episodes;
+  var selected = episodes[wantedEpisode - 1] || null;
+  if (selected && selected.link) return selected;
+
+  // Some source pages label episode numbers in the title; use that label
+  // as a fallback when the list is sparse or not in strict numeric order.
+  for (var j = 0; j < episodes.length; j++) {
+    var episodeTitle = String(episodes[j].title || "");
+    var patterns = [
+      new RegExp("\\bS" + String(wantedSeason).padStart(2, "0") + "E" + String(wantedEpisode).padStart(2, "0") + "\\b", "i"),
+      new RegExp("\\bEpisode\\s*" + wantedEpisode + "\\b", "i"),
+      new RegExp("\\bEp\\.?\\s*" + wantedEpisode + "\\b", "i")
+    ];
+    if (patterns.some(function (pattern) { return pattern.test(episodeTitle); }) && episodes[j].link) {
+      return episodes[j];
+    }
+  }
+  console.warn("[Circle FTP] Episode not found:", wantedSeason, wantedEpisode, "available:", episodes.length);
+  return null;
 }
 
 function loadPost(post, mediaType, season, episode) {
@@ -188,7 +233,11 @@ function loadPost(post, mediaType, season, episode) {
       if (movieUrl) links.push(movieUrl);
     } else if (data.type === "series") {
       var selected = selectEpisode(data, season, episode);
-      if (selected && selected.link) links.push(selected.link);
+      if (selected && selected.link) {
+        links.push(selected.link);
+      } else {
+        console.warn("[Circle FTP] No stream extracted for", post.title, "S" + (season || 1) + "E" + (episode || 1));
+      }
     }
 
     var streams = [];
@@ -221,11 +270,13 @@ function getStreams(tmdbId, mediaType, season, episode, title) {
       return [];
     }
     return getPostsByTitle(resolvedTitle).then(function (posts) {
+      console.log("[Circle FTP] Search returned", posts.length, "posts for", resolvedTitle);
       var post = choosePost(posts, resolvedTitle);
       if (!post) {
         console.log("[Circle FTP] No confident Circle FTP match for: " + resolvedTitle);
         return [];
       }
+      console.log("[Circle FTP] Matched", post.type, post.title, "for", resolvedTitle);
       return loadPost(post, mediaType, season, episode);
     });
   }).catch(function (error) {
