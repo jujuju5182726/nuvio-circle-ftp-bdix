@@ -1,0 +1,24 @@
+{
+  "id": "circleftp-bdix",
+  "name": "Circle FTP BDIX",
+  "description": "Circle FTP stream provider for Nuvio. Intended for compatible BDIX networks in Bangladesh.",
+  "version": "1.0.0",
+  "author": "Ported from user-supplied Cloudstream provider",
+  "supportedTypes": [
+    "movie",
+    "tv"
+  ],
+  "filename": "providers/circleftp.js",
+  "enabled": true,
+  "contentLanguage": [
+    "bn",
+    "en",
+    "hi"
+  ],
+  "formats": [
+    "mp4",
+    "mkv",
+    "m3u8"
+  ],
+  "supportsExternalPlayer": true
+}
